@@ -1,0 +1,182 @@
+// ============================================================
+// Jenkinsfile — CI/CD Pipeline: Build → Scan → Push → GitOps
+// ============================================================
+
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION      = 'us-east-1'
+    AWS_ACCOUNT_ID  = credentials('aws-account-id')
+    ECR_REGISTRY    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    PROJECT_NAME    = 'devops-showcase'
+    GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+    IMAGE_TAG       = "${GIT_COMMIT_SHORT}-${BUILD_NUMBER}"
+    GITOPS_REPO     = 'https://github.com/Noxsup/devops-cloud-native-showcase.git'
+  }
+
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    timeout(time: 45, unit: 'MINUTES')
+    disableConcurrentBuilds()
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        checkout scm
+        sh 'echo "Branch: ${GIT_BRANCH} | Commit: ${GIT_COMMIT_SHORT}"'
+      }
+    }
+
+    stage('Install & Unit Test') {
+      parallel {
+        stage('Frontend') {
+          steps {
+            dir('apps/frontend') {
+              sh 'npm ci'
+              sh 'npm test -- --watchAll=false --passWithNoTests'
+            }
+          }
+        }
+        stage('Product Service') {
+          steps {
+            dir('apps/product-service') {
+              sh 'npm ci'
+              sh 'npm test -- --passWithNoTests'
+            }
+          }
+        }
+        stage('Order Service') {
+          steps {
+            dir('apps/order-service') {
+              sh 'npm ci'
+              sh 'npm test -- --passWithNoTests'
+            }
+          }
+        }
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        withSonarQubeEnv('SonarQube') {
+          sh '''
+            sonar-scanner \\
+              -Dsonar.projectKey=${PROJECT_NAME} \\
+              -Dsonar.sources=apps \\
+              -Dsonar.host.url=${SONAR_HOST_URL} \\
+              -Dsonar.login=${SONAR_AUTH_TOKEN}
+          '''
+        }
+      }
+    }
+
+    stage('Quality Gate') {
+      steps {
+        timeout(time: 5, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
+    stage('Docker Build') {
+      parallel {
+        stage('Build Frontend') {
+          steps {
+            sh "docker build -t ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:${IMAGE_TAG} apps/frontend/"
+          }
+        }
+        stage('Build Product Service') {
+          steps {
+            sh "docker build -t ${ECR_REGISTRY}/${PROJECT_NAME}/product-service:${IMAGE_TAG} apps/product-service/"
+          }
+        }
+        stage('Build Order Service') {
+          steps {
+            sh "docker build -t ${ECR_REGISTRY}/${PROJECT_NAME}/order-service:${IMAGE_TAG} apps/order-service/"
+          }
+        }
+      }
+    }
+
+    stage('Trivy Security Scan') {
+      parallel {
+        stage('Scan Frontend') {
+          steps {
+            sh "trivy image --exit-code 1 --severity HIGH,CRITICAL ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:${IMAGE_TAG}"
+          }
+        }
+        stage('Scan Product Service') {
+          steps {
+            sh "trivy image --exit-code 1 --severity HIGH,CRITICAL ${ECR_REGISTRY}/${PROJECT_NAME}/product-service:${IMAGE_TAG}"
+          }
+        }
+        stage('Scan Order Service') {
+          steps {
+            sh "trivy image --exit-code 1 --severity HIGH,CRITICAL ${ECR_REGISTRY}/${PROJECT_NAME}/order-service:${IMAGE_TAG}"
+          }
+        }
+      }
+    }
+
+    stage('Push to ECR') {
+      steps {
+        withAWS(region: AWS_REGION, credentials: 'aws-credentials') {
+          sh '''
+            aws ecr get-login-password --region ${AWS_REGION} | \\
+              docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+            docker push ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:${IMAGE_TAG}
+            docker push ${ECR_REGISTRY}/${PROJECT_NAME}/product-service:${IMAGE_TAG}
+            docker push ${ECR_REGISTRY}/${PROJECT_NAME}/order-service:${IMAGE_TAG}
+
+            docker tag ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:${IMAGE_TAG} \\
+                        ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:latest
+            docker push ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:latest
+          '''
+        }
+      }
+    }
+
+    stage('Update GitOps Manifests') {
+      steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'github-credentials',
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_TOKEN')]) {
+          sh '''
+            git config user.email "jenkins@devops-showcase.io"
+            git config user.name  "Jenkins CI"
+
+            sed -i "s|image: .*frontend:.*|image: ${ECR_REGISTRY}/${PROJECT_NAME}/frontend:${IMAGE_TAG}|" \\
+              deploy/k8s/frontend/deployment.yaml
+            sed -i "s|image: .*product-service:.*|image: ${ECR_REGISTRY}/${PROJECT_NAME}/product-service:${IMAGE_TAG}|" \\
+              deploy/k8s/product-service/deployment.yaml
+            sed -i "s|image: .*order-service:.*|image: ${ECR_REGISTRY}/${PROJECT_NAME}/order-service:${IMAGE_TAG}|" \\
+              deploy/k8s/order-service/deployment.yaml
+
+            git add deploy/k8s/
+            git commit -m "ci: update image tags to ${IMAGE_TAG} [skip ci]"
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/Noxsup/devops-cloud-native-showcase.git HEAD:main
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Pipeline succeeded! Image tag: ${IMAGE_TAG}"
+      slackSend(color: '#00FF00', message: "SUCCESS: ${JOB_NAME} build ${BUILD_NUMBER} - tag ${IMAGE_TAG}")
+    }
+    failure {
+      echo 'Pipeline failed!'
+      slackSend(color: '#FF0000', message: "FAILED: ${JOB_NAME} build ${BUILD_NUMBER}")
+    }
+    always {
+      cleanWs()
+    }
+  }
+}

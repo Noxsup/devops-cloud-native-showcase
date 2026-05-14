@@ -1,0 +1,56 @@
+# ============================================================
+# ArgoCD App-of-Apps — manages all microservice applications
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devops-showcase-apps
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Noxsup/devops-cloud-native-showcase.git
+    targetRevision: main
+    path: gitops/argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+---
+# ============================================================
+# ArgoCD Project — scoped permissions
+# ============================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devops-showcase
+  namespace: argocd
+spec:
+  description: DevOps Showcase Project
+  sourceRepos:
+    - 'https://github.com/Noxsup/devops-cloud-native-showcase.git'
+  destinations:
+    - namespace: 'devops-*'
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: 'apps'
+      kind: Deployment
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ConfigMap
+    - group: 'networking.k8s.io'
+      kind: Ingress

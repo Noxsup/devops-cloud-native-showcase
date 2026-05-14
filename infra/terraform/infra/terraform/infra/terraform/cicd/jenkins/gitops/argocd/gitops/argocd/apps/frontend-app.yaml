@@ -1,0 +1,62 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: frontend
+  namespace: argocd
+spec:
+  project: devops-showcase
+  source:
+    repoURL: https://github.com/Noxsup/devops-cloud-native-showcase.git
+    targetRevision: main
+    path: deploy/k8s/frontend
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: devops-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: product-service
+  namespace: argocd
+spec:
+  project: devops-showcase
+  source:
+    repoURL: https://github.com/Noxsup/devops-cloud-native-showcase.git
+    targetRevision: main
+    path: deploy/k8s/product-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: devops-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service
+  namespace: argocd
+spec:
+  project: devops-showcase
+  source:
+    repoURL: https://github.com/Noxsup/devops-cloud-native-showcase.git
+    targetRevision: main
+    path: deploy/k8s/order-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: devops-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
