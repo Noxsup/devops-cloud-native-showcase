@@ -1,0 +1,40 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+crash.log
+
+# Node
+node_modules/
+npm-debug.log*
+*.log
+
+# AWS credentials
+.aws/
+
+# Secrets & Keys
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE
+.vscode/settings.json
+.idea/
+*.iml
+
+# Build artifacts
+dist/
+build/
+*.zip
