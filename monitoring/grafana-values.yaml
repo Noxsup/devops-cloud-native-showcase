@@ -1,0 +1,58 @@
+# Grafana Helm values for devops-cloud-native-showcase
+adminPassword: "admin"
+
+service:
+  type: LoadBalancer
+  port: 80
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-kube-prometheus-prometheus:9090
+        access: proxy
+        isDefault: true
+
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: default
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+dashboards:
+  default:
+    kubernetes-cluster:
+      gnetId: 6417
+      revision: 1
+      datasource: Prometheus
+    nodejs-app:
+      gnetId: 11159
+      revision: 1
+      datasource: Prometheus
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+grafana.ini:
+  server:
+    root_url: "%(protocol)s://%(domain)s/"
+  auth.anonymous:
+    enabled: false
