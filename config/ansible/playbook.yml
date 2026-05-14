@@ -1,0 +1,123 @@
+---
+# ============================================================
+# Ansible Playbook - Bootstrap Jenkins host on EC2
+# Usage: ansible-playbook -i inventory/hosts.ini playbook.yml
+# ============================================================
+
+- name: Bootstrap Jenkins Host
+  hosts: jenkins
+  become: true
+  vars:
+    jenkins_version: "2.452.3"
+    kubectl_version: "1.29.0"
+    helm_version: "3.15.2"
+    trivy_version: "0.52.0"
+    sonar_scanner_version: "6.0.0.4432"
+
+  tasks:
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - git
+          - curl
+          - wget
+          - unzip
+          - jq
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - openjdk-17-jdk
+        state: present
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker CE
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Add Jenkins user to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Add Jenkins apt key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: "jenkins={{ jenkins_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Jenkins
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Install Helm
+      unarchive:
+        src: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+        dest: /usr/local/bin
+        remote_src: yes
+        extra_opts: [--strip-components=1]
+        include: linux-amd64/helm
+
+    - name: Install Trivy
+      apt:
+        deb: "https://github.com/aquasecurity/trivy/releases/download/v{{ trivy_version }}/trivy_{{ trivy_version }}_Linux-64bit.deb"
+
+    - name: Install AWS CLI v2
+      shell: |
+        curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+        unzip -q /tmp/awscliv2.zip -d /tmp
+        /tmp/aws/install --update
+      args:
+        creates: /usr/local/bin/aws
+
+    - name: Install SonarQube Scanner
+      unarchive:
+        src: "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-{{ sonar_scanner_version }}-linux.zip"
+        dest: /opt
+        remote_src: yes
+      notify: link sonar-scanner
+
+  handlers:
+    - name: link sonar-scanner
+      file:
+        src: "/opt/sonar-scanner-{{ sonar_scanner_version }}-linux/bin/sonar-scanner"
+        dest: /usr/local/bin/sonar-scanner
+        state: link
