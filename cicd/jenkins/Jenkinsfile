@@ -1,0 +1,138 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION      = 'us-east-1'
+    ECR_REGISTRY    = credentials('ecr-registry')
+    IMAGE_TAG       = "${env.BUILD_NUMBER}"
+    SONAR_HOST      = credentials('sonar-host-url')
+    SONAR_TOKEN     = credentials('sonar-token')
+    ARGOCD_SERVER   = credentials('argocd-server')
+    ARGOCD_TOKEN    = credentials('argocd-token')
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        withSonarQubeEnv('SonarQube') {
+          sh '''
+            sonar-scanner \
+              -Dsonar.projectKey=devops-cloud-native \
+              -Dsonar.sources=apps \
+              -Dsonar.host.url=${SONAR_HOST} \
+              -Dsonar.login=${SONAR_TOKEN}
+          '''
+        }
+      }
+    }
+
+    stage('Quality Gate') {
+      steps {
+        timeout(time: 5, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
+    stage('Build & Push Images') {
+      parallel {
+        stage('Frontend') {
+          steps {
+            script {
+              docker.build("${ECR_REGISTRY}/frontend:${IMAGE_TAG}", 'apps/frontend')
+              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
+                docker.image("${ECR_REGISTRY}/frontend:${IMAGE_TAG}").push()
+                docker.image("${ECR_REGISTRY}/frontend:${IMAGE_TAG}").push('latest')
+              }
+            }
+          }
+        }
+        stage('Product Service') {
+          steps {
+            script {
+              docker.build("${ECR_REGISTRY}/product-service:${IMAGE_TAG}", 'apps/product-service')
+              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
+                docker.image("${ECR_REGISTRY}/product-service:${IMAGE_TAG}").push()
+                docker.image("${ECR_REGISTRY}/product-service:${IMAGE_TAG}").push('latest')
+              }
+            }
+          }
+        }
+        stage('Order Service') {
+          steps {
+            script {
+              docker.build("${ECR_REGISTRY}/order-service:${IMAGE_TAG}", 'apps/order-service')
+              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
+                docker.image("${ECR_REGISTRY}/order-service:${IMAGE_TAG}").push()
+                docker.image("${ECR_REGISTRY}/order-service:${IMAGE_TAG}").push('latest')
+              }
+            }
+          }
+        }
+      }
+    }
+
+    stage('Trivy Security Scan') {
+      steps {
+        sh '''
+          trivy image --exit-code 1 --severity HIGH,CRITICAL \
+            ${ECR_REGISTRY}/frontend:${IMAGE_TAG}
+          trivy image --exit-code 1 --severity HIGH,CRITICAL \
+            ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
+          trivy image --exit-code 1 --severity HIGH,CRITICAL \
+            ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
+        '''
+      }
+    }
+
+    stage('Update GitOps Manifests') {
+      steps {
+        script {
+          sh '''
+            sed -i "s|image:.*frontend.*|image: ${ECR_REGISTRY}/frontend:${IMAGE_TAG}|g" \
+              deploy/k8s/frontend/deployment.yaml
+            sed -i "s|image:.*product-service.*|image: ${ECR_REGISTRY}/product-service:${IMAGE_TAG}|g" \
+              deploy/k8s/product-service/deployment.yaml
+            sed -i "s|image:.*order-service.*|image: ${ECR_REGISTRY}/order-service:${IMAGE_TAG}|g" \
+              deploy/k8s/order-service/deployment.yaml
+            git config user.email 'jenkins@ci.local'
+            git config user.name 'Jenkins CI'
+            git add deploy/k8s/
+            git commit -m "ci: update image tags to ${IMAGE_TAG}"
+            git push origin main
+          '''
+        }
+      }
+    }
+
+    stage('ArgoCD Sync') {
+      steps {
+        sh '''
+          argocd login ${ARGOCD_SERVER} --auth-token ${ARGOCD_TOKEN} --insecure
+          argocd app sync devops-showcase --force
+          argocd app wait devops-showcase --health --timeout 300
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      slackSend(channel: '#deployments', color: 'good',
+        message: "SUCCESS: Build ${env.BUILD_NUMBER} deployed to EKS")
+    }
+    failure {
+      slackSend(channel: '#deployments', color: 'danger',
+        message: "FAILURE: Build ${env.BUILD_NUMBER} failed")
+    }
+    always {
+      cleanWs()
+    }
+  }
+}
