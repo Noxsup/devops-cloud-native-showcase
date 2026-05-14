@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devops-showcase
+  namespace: argocd
+spec:
+  description: DevOps Cloud Native Showcase Project
+  sourceRepos:
+    - https://github.com/Noxsup/devops-cloud-native-showcase.git
+  destinations:
+    - namespace: devops-showcase
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: ServiceAccount
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+  roles:
+    - name: ci-role
+      description: Role for CI/CD systems
+      policies:
+        - p, proj:devops-showcase:ci-role, applications, sync, devops-showcase/*, allow
+        - p, proj:devops-showcase:ci-role, applications, get, devops-showcase/*, allow
