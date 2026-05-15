@@ -1,138 +1,214 @@
+// =============================================================
+// Jenkinsfile — Declarative CI Pipeline
+// Triggered automatically on every push to the 'main' branch via
+// a GitHub webhook pointing to http://YOUR_EC2_IP:8080
+//
+// Pipeline stages (in order):
+//   1. Checkout       — pull latest code from GitHub
+//   2. SonarQube      — static code analysis (SAST)
+//   3. Docker Build   — build images for all 3 microservices
+//   4. Trivy Scan     — scan images for CVEs before push
+//   5. Push to ECR    — push tagged images to AWS ECR
+//   6. Update Manifests — patch image tags in deploy/k8s/
+//   7. Notify         — send Slack notification on success/failure
+// =============================================================
+
 pipeline {
+  // Run on any available Jenkins agent (executor)
   agent any
 
   environment {
-    AWS_REGION      = 'us-east-1'
-    ECR_REGISTRY    = credentials('ecr-registry')
-    IMAGE_TAG       = "${env.BUILD_NUMBER}"
-    SONAR_HOST      = credentials('sonar-host-url')
-    SONAR_TOKEN     = credentials('sonar-token')
-    ARGOCD_SERVER   = credentials('argocd-server')
-    ARGOCD_TOKEN    = credentials('argocd-token')
+    // Target AWS region for ECR login and pushes
+    AWS_REGION     = 'us-east-1'
+
+    // ECR registry URL stored as a Jenkins secret credential
+    // Format: <account_id>.dkr.ecr.<region>.amazonaws.com
+    ECR_REGISTRY   = credentials('ecr-registry')
+
+    // Unique image tag per build — using Jenkins build number
+    // Ensures every build produces a traceable, immutable image tag
+    IMAGE_TAG      = "${env.BUILD_NUMBER}"
+
+    // SonarQube server URL and auth token (stored in Jenkins credentials)
+    SONAR_HOST     = credentials('sonar-host-url')
+    SONAR_TOKEN    = credentials('sonar-token')
+
+    // ArgoCD server + token for triggering a sync after manifest update
+    ARGOCD_SERVER  = credentials('argocd-server')
+    ARGOCD_TOKEN   = credentials('argocd-token')
   }
 
   stages {
+
+    // ---------------------------------------------------------
+    // STAGE 1: Checkout
+    // Pulls the latest code from the configured GitHub branch.
+    // Jenkins uses the SCM settings defined in the job config.
+    // ---------------------------------------------------------
     stage('Checkout') {
       steps {
         checkout scm
       }
     }
 
+    // ---------------------------------------------------------
+    // STAGE 2: SonarQube Analysis (SAST)
+    // Runs static analysis on the source code.
+    // If the quality gate fails (bugs/vulnerabilities too high),
+    // the pipeline is aborted here — nothing gets built or pushed.
+    // ---------------------------------------------------------
     stage('SonarQube Analysis') {
       steps {
         withSonarQubeEnv('SonarQube') {
           sh '''
             sonar-scanner \
-              -Dsonar.projectKey=devops-cloud-native \
+              -Dsonar.projectKey=devops-showcase \
               -Dsonar.sources=apps \
               -Dsonar.host.url=${SONAR_HOST} \
               -Dsonar.login=${SONAR_TOKEN}
           '''
         }
-      }
-    }
-
-    stage('Quality Gate') {
-      steps {
+        // Block pipeline until SonarQube quality gate result is returned
+        // Timeout after 5 minutes if SonarQube doesn't respond
         timeout(time: 5, unit: 'MINUTES') {
           waitForQualityGate abortPipeline: true
         }
       }
     }
 
-    stage('Build & Push Images') {
+    // ---------------------------------------------------------
+    // STAGE 3: Docker Build
+    // Builds Docker images for all 3 microservices in parallel
+    // to save time. Each image is tagged with the build number.
+    // ---------------------------------------------------------
+    stage('Docker Build') {
       parallel {
-        stage('Frontend') {
+        stage('Build Frontend') {
           steps {
-            script {
-              docker.build("${ECR_REGISTRY}/frontend:${IMAGE_TAG}", 'apps/frontend')
-              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
-                docker.image("${ECR_REGISTRY}/frontend:${IMAGE_TAG}").push()
-                docker.image("${ECR_REGISTRY}/frontend:${IMAGE_TAG}").push('latest')
-              }
-            }
+            sh "docker build -t ${ECR_REGISTRY}/devops-showcase/frontend:${IMAGE_TAG} apps/frontend/"
           }
         }
-        stage('Product Service') {
+        stage('Build Product Service') {
           steps {
-            script {
-              docker.build("${ECR_REGISTRY}/product-service:${IMAGE_TAG}", 'apps/product-service')
-              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
-                docker.image("${ECR_REGISTRY}/product-service:${IMAGE_TAG}").push()
-                docker.image("${ECR_REGISTRY}/product-service:${IMAGE_TAG}").push('latest')
-              }
-            }
+            sh "docker build -t ${ECR_REGISTRY}/devops-showcase/product-service:${IMAGE_TAG} apps/product-service/"
           }
         }
-        stage('Order Service') {
+        stage('Build Order Service') {
           steps {
-            script {
-              docker.build("${ECR_REGISTRY}/order-service:${IMAGE_TAG}", 'apps/order-service')
-              docker.withRegistry("https://${ECR_REGISTRY}", 'ecr:us-east-1:aws-creds') {
-                docker.image("${ECR_REGISTRY}/order-service:${IMAGE_TAG}").push()
-                docker.image("${ECR_REGISTRY}/order-service:${IMAGE_TAG}").push('latest')
-              }
-            }
+            sh "docker build -t ${ECR_REGISTRY}/devops-showcase/order-service:${IMAGE_TAG} apps/order-service/"
           }
         }
       }
     }
 
-    stage('Trivy Security Scan') {
+    // ---------------------------------------------------------
+    // STAGE 4: Trivy Security Scan (Container CVE Scanning)
+    // Trivy scans each built image for known vulnerabilities.
+    // --exit-code 1 means the pipeline FAILS if HIGH or CRITICAL
+    // severity CVEs are found — enforces a security quality gate.
+    // ---------------------------------------------------------
+    stage('Trivy Scan') {
       steps {
         sh '''
+          # Scan frontend image — fail if HIGH/CRITICAL CVEs found
           trivy image --exit-code 1 --severity HIGH,CRITICAL \
-            ${ECR_REGISTRY}/frontend:${IMAGE_TAG}
+            ${ECR_REGISTRY}/devops-showcase/frontend:${IMAGE_TAG}
+
+          # Scan product-service image
           trivy image --exit-code 1 --severity HIGH,CRITICAL \
-            ${ECR_REGISTRY}/product-service:${IMAGE_TAG}
+            ${ECR_REGISTRY}/devops-showcase/product-service:${IMAGE_TAG}
+
+          # Scan order-service image
           trivy image --exit-code 1 --severity HIGH,CRITICAL \
-            ${ECR_REGISTRY}/order-service:${IMAGE_TAG}
+            ${ECR_REGISTRY}/devops-showcase/order-service:${IMAGE_TAG}
         '''
       }
     }
 
-    stage('Update GitOps Manifests') {
+    // ---------------------------------------------------------
+    // STAGE 5: Push to ECR
+    // Authenticates to AWS ECR using the Jenkins AWS credentials,
+    // then pushes all 3 scanned images.
+    // ---------------------------------------------------------
+    stage('Push to ECR') {
       steps {
-        script {
+        withAWS(credentials: 'aws-credentials', region: AWS_REGION) {
           sh '''
-            sed -i "s|image:.*frontend.*|image: ${ECR_REGISTRY}/frontend:${IMAGE_TAG}|g" \
-              deploy/k8s/frontend/deployment.yaml
-            sed -i "s|image:.*product-service.*|image: ${ECR_REGISTRY}/product-service:${IMAGE_TAG}|g" \
-              deploy/k8s/product-service/deployment.yaml
-            sed -i "s|image:.*order-service.*|image: ${ECR_REGISTRY}/order-service:${IMAGE_TAG}|g" \
-              deploy/k8s/order-service/deployment.yaml
-            git config user.email 'jenkins@ci.local'
-            git config user.name 'Jenkins CI'
-            git add deploy/k8s/
-            git commit -m "ci: update image tags to ${IMAGE_TAG}"
-            git push origin main
+            # Authenticate Docker with ECR (token valid for 12 hours)
+            aws ecr get-login-password --region ${AWS_REGION} | \
+              docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+            # Push all 3 images
+            docker push ${ECR_REGISTRY}/devops-showcase/frontend:${IMAGE_TAG}
+            docker push ${ECR_REGISTRY}/devops-showcase/product-service:${IMAGE_TAG}
+            docker push ${ECR_REGISTRY}/devops-showcase/order-service:${IMAGE_TAG}
           '''
         }
       }
     }
 
-    stage('ArgoCD Sync') {
+    // ---------------------------------------------------------
+    // STAGE 6: Update Kubernetes Manifests
+    // Updates the image tag in each deployment.yaml to the new
+    // build number using sed. Then commits and pushes the change
+    // back to GitHub.
+    // ArgoCD watches the repo and will auto-sync the new manifests
+    // to the EKS cluster (GitOps pattern).
+    // ---------------------------------------------------------
+    stage('Update K8s Manifests') {
       steps {
-        sh '''
-          argocd login ${ARGOCD_SERVER} --auth-token ${ARGOCD_TOKEN} --insecure
-          argocd app sync devops-showcase --force
-          argocd app wait devops-showcase --health --timeout 300
-        '''
+        withCredentials([usernamePassword(
+          credentialsId: 'github-credentials',
+          usernameVariable: 'GIT_USER',
+          passwordVariable: 'GIT_TOKEN'
+        )]) {
+          sh '''
+            # Configure git identity for the commit
+            git config user.email "jenkins@devops-showcase.com"
+            git config user.name "Jenkins CI"
+
+            # Patch each deployment.yaml with the new image tag
+            sed -i "s|image:.*frontend.*|image: ${ECR_REGISTRY}/devops-showcase/frontend:${IMAGE_TAG}|g" \
+              deploy/k8s/frontend/deployment.yaml
+
+            sed -i "s|image:.*product-service.*|image: ${ECR_REGISTRY}/devops-showcase/product-service:${IMAGE_TAG}|g" \
+              deploy/k8s/product-service/deployment.yaml
+
+            sed -i "s|image:.*order-service.*|image: ${ECR_REGISTRY}/devops-showcase/order-service:${IMAGE_TAG}|g" \
+              deploy/k8s/order-service/deployment.yaml
+
+            # Commit and push — this triggers ArgoCD to sync
+            git add deploy/k8s/
+            git commit -m "ci: update image tags to build ${IMAGE_TAG} [skip ci]"
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/Noxsup/devops-cloud-native-showcase.git main
+          '''
+        }
       }
     }
   }
 
+  // ---------------------------------------------------------
+  // POST — Always runs after stages complete (pass or fail)
+  // Sends a Slack notification with the result.
+  // ---------------------------------------------------------
   post {
     success {
-      slackSend(channel: '#deployments', color: 'good',
-        message: "SUCCESS: Build ${env.BUILD_NUMBER} deployed to EKS")
+      // Green notification: build passed all stages
+      slackSend(
+        color: 'good',
+        message: ":white_check_mark: Build #${BUILD_NUMBER} succeeded! Image tag: ${IMAGE_TAG}"
+      )
     }
     failure {
-      slackSend(channel: '#deployments', color: 'danger',
-        message: "FAILURE: Build ${env.BUILD_NUMBER} failed")
+      // Red notification: something failed (scan, build, push, etc.)
+      slackSend(
+        color: 'danger',
+        message: ":x: Build #${BUILD_NUMBER} FAILED. Check Jenkins: ${BUILD_URL}"
+      )
     }
     always {
-      cleanWs()
+      // Clean up local Docker images to free disk space on the Jenkins agent
+      sh 'docker system prune -f || true'
     }
   }
 }
