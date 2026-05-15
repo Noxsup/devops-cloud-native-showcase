@@ -1,13 +1,39 @@
 ---
-# ============================================================
-# Ansible Playbook - Bootstrap Jenkins host on EC2
-# Usage: ansible-playbook -i inventory/hosts.ini playbook.yml
-# ============================================================
+# ==============================================================
+# playbook.yml — Ansible Playbook: Bootstrap Jenkins Host on EC2
+# ==============================================================
+#
+# WHAT IS ANSIBLE?
+# Ansible is an agentless configuration management tool.
+# It connects to servers via SSH and runs tasks defined in YAML.
+# No agent needs to be installed on the target server.
+#
+# WHAT THIS PLAYBOOK DOES:
+# Provisions a fresh Ubuntu EC2 instance to be a full Jenkins
+# CI/CD host with all required DevOps tools:
+#   - Java (required by Jenkins)
+#   - Jenkins (CI/CD server)
+#   - Docker (build container images)
+#   - kubectl (deploy to EKS)
+#   - Helm (deploy Helm charts)
+#   - Trivy (container security scanning)
+#   - SonarScanner (static code analysis)
+#
+# HOW TO RUN:
+#   ansible-playbook -i inventory/hosts.ini playbook.yml
+#
+# INVENTORY FILE FORMAT (inventory/hosts.ini):
+#   [jenkins]
+#   your-ec2-public-ip ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/your-key.pem
+# ==============================================================
 
 - name: Bootstrap Jenkins Host
-  hosts: jenkins
-  become: true
+  hosts: jenkins        # Target host group defined in inventory
+  become: true          # Run all tasks with sudo (root privileges)
+
   vars:
+    # Pin tool versions for reproducible builds
+    # Update these when you want to upgrade a tool
     jenkins_version: "2.452.3"
     kubectl_version: "1.29.0"
     helm_version: "3.15.2"
@@ -16,58 +42,35 @@
 
   tasks:
 
+    # --- System Setup ---
     - name: Update apt cache
       apt:
         update_cache: yes
-        cache_valid_time: 3600
+        cache_valid_time: 3600  # Only update if cache is older than 1 hour
 
     - name: Install base packages
       apt:
         name:
-          - git
-          - curl
-          - wget
-          - unzip
-          - jq
-          - apt-transport-https
-          - ca-certificates
-          - gnupg
-          - lsb-release
-          - openjdk-17-jdk
+          - apt-transport-https  # Needed for HTTPS apt repos
+          - ca-certificates      # SSL cert verification
+          - curl                 # Download tool
+          - gnupg                # GPG key management for apt
+          - lsb-release          # Distro version info
+          - git                  # Source control
+          - unzip                # Extract archives
+          - openjdk-17-jdk       # Java 17 - required by Jenkins
         state: present
 
-    - name: Add Docker GPG key
-      apt_key:
-        url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
-
-    - name: Add Docker repository
-      apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
-        state: present
-
-    - name: Install Docker CE
-      apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-        state: present
-
-    - name: Add Jenkins user to docker group
-      user:
-        name: jenkins
-        groups: docker
-        append: yes
-
+    # --- Jenkins Installation ---
+    # Jenkins is installed from its official apt repository
     - name: Add Jenkins apt key
       apt_key:
         url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
         state: present
 
-    - name: Add Jenkins repository
+    - name: Add Jenkins apt repository
       apt_repository:
-        repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+        repo: deb https://pkg.jenkins.io/debian-stable binary/
         state: present
 
     - name: Install Jenkins
@@ -76,48 +79,123 @@
         state: present
         update_cache: yes
 
-    - name: Start and enable Jenkins
+    - name: Start and enable Jenkins service
       systemd:
         name: jenkins
         state: started
-        enabled: yes
+        enabled: yes   # Auto-start on server reboot
 
-    - name: Install kubectl
+    # --- Docker Installation ---
+    # Jenkins needs Docker to build container images in pipelines
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce          # Docker engine
+          - docker-ce-cli      # Docker CLI
+          - containerd.io      # Container runtime
+        state: present
+
+    - name: Add jenkins user to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes  # Don't remove existing groups, just add docker
+
+    # --- kubectl Installation ---
+    # kubectl lets Jenkins deploy to your EKS cluster
+    - name: Download kubectl binary
       get_url:
         url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
         dest: /usr/local/bin/kubectl
-        mode: '0755'
+        mode: '0755'  # Make executable
+
+    # --- Helm Installation ---
+    # Helm is used in Jenkinsfile to deploy/upgrade Helm charts
+    - name: Download Helm installer script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm.sh
+        mode: '0700'
 
     - name: Install Helm
-      unarchive:
-        src: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
-        dest: /usr/local/bin
-        remote_src: yes
-        extra_opts: [--strip-components=1]
-        include: linux-amd64/helm
-
-    - name: Install Trivy
-      apt:
-        deb: "https://github.com/aquasecurity/trivy/releases/download/v{{ trivy_version }}/trivy_{{ trivy_version }}_Linux-64bit.deb"
-
-    - name: Install AWS CLI v2
-      shell: |
-        curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
-        unzip -q /tmp/awscliv2.zip -d /tmp
-        /tmp/aws/install --update
+      shell: /tmp/get-helm.sh --version v{{ helm_version }}
       args:
-        creates: /usr/local/bin/aws
+        creates: /usr/local/bin/helm  # Skip if helm already installed
 
-    - name: Install SonarQube Scanner
+    # --- Trivy Security Scanner ---
+    # Scans Docker images for CVEs before pushing to registry
+    - name: Download Trivy
+      get_url:
+        url: "https://github.com/aquasecurity/trivy/releases/download/v{{ trivy_version }}/trivy_{{ trivy_version }}_Linux-64bit.tar.gz"
+        dest: /tmp/trivy.tar.gz
+
+    - name: Extract and install Trivy
       unarchive:
-        src: "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-{{ sonar_scanner_version }}-linux.zip"
-        dest: /opt
-        remote_src: yes
-      notify: link sonar-scanner
+        src: /tmp/trivy.tar.gz
+        dest: /usr/local/bin
+        remote_src: yes  # The archive is already on the remote machine
+        include:
+          - trivy
 
-  handlers:
-    - name: link sonar-scanner
+    # --- SonarScanner Installation ---
+    # Static code analysis tool that integrates with SonarQube/SonarCloud
+    - name: Download SonarScanner
+      get_url:
+        url: "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-{{ sonar_scanner_version }}-linux.zip"
+        dest: /tmp/sonar-scanner.zip
+
+    - name: Extract SonarScanner
+      unarchive:
+        src: /tmp/sonar-scanner.zip
+        dest: /opt/
+        remote_src: yes
+
+    - name: Create sonar-scanner symlink
       file:
         src: "/opt/sonar-scanner-{{ sonar_scanner_version }}-linux/bin/sonar-scanner"
         dest: /usr/local/bin/sonar-scanner
-        state: link
+        state: link  # Creates a symlink so it's in PATH
+
+    # --- AWS CLI ---
+    # Required for Jenkins to authenticate with ECR and EKS
+    - name: Download AWS CLI installer
+      get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+
+    - name: Extract AWS CLI
+      unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Install AWS CLI
+      shell: /tmp/aws/install
+      args:
+        creates: /usr/local/bin/aws  # Skip if already installed
+
+    # --- Final Verification ---
+    - name: Verify all tools are installed
+      shell: |
+        echo "Jenkins: $(jenkins --version 2>/dev/null || echo 'service')" &&
+        echo "Docker:  $(docker --version)" &&
+        echo "kubectl: $(kubectl version --client --short)" &&
+        echo "Helm:    $(helm version --short)" &&
+        echo "Trivy:   $(trivy --version)" &&
+        echo "AWS CLI: $(aws --version)"
+      register: tool_versions
+      changed_when: false  # This task just reads, doesn't change state
+
+    - name: Print tool versions
+      debug:
+        var: tool_versions.stdout_lines  # Output versions to Ansible log
