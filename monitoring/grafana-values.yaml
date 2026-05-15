@@ -1,58 +1,84 @@
-# Grafana Helm values for devops-cloud-native-showcase
+# ==============================================================
+# grafana-values.yaml — Helm values for Grafana
+# ==============================================================
+#
+# WHAT IS GRAFANA?
+# Grafana is the visualization layer of the monitoring stack.
+# It connects to Prometheus as a data source and provides:
+#   - Pre-built Kubernetes dashboards (CPU, memory, network, pods)
+#   - Custom dashboards for application metrics
+#   - Alert notifications via Slack, email, PagerDuty
+#   - User authentication and role-based access
+#
+# INSTALL COMMAND:
+#   helm upgrade --install grafana grafana/grafana \
+#     -n monitoring --create-namespace \
+#     -f monitoring/grafana-values.yaml
+#
+# ACCESS:
+#   kubectl port-forward svc/grafana 3000:80 -n monitoring
+#   Then open http://localhost:3000
+#   Login: admin / admin (change in production!)
+# ==============================================================
+
+# Default admin password — CHANGE THIS in production!
+# Better: use a Kubernetes Secret and reference it here
 adminPassword: "admin"
 
+# --- Service Configuration ---
 service:
-  type: LoadBalancer
-  port: 80
+  type: LoadBalancer   # Expose via AWS ELB so Grafana is accessible externally
+  port: 80             # HTTP port (use 443 + TLS in production)
 
+# --- Persistent Storage ---
+# Without this, dashboards/configs are lost when the pod restarts
 persistence:
   enabled: true
-  size: 5Gi
+  size: 5Gi            # 5GB EBS volume for dashboard storage
 
+# --- Data Sources ---
+# Automatically configure Prometheus as a data source on startup
+# (no manual setup needed via the UI)
 datasources:
   datasources.yaml:
     apiVersion: 1
     datasources:
       - name: Prometheus
         type: prometheus
+        # Internal K8s DNS name for the Prometheus service
+        # Format: <service-name>.<namespace>.svc.cluster.local:<port>
         url: http://prometheus-kube-prometheus-prometheus:9090
-        access: proxy
-        isDefault: true
+        access: proxy      # Grafana backend proxies requests to Prometheus
+        isDefault: true    # Use this as the default data source for new panels
 
+# --- Dashboard Providers ---
+# Tell Grafana WHERE to look for dashboard JSON files
+# Dashboards in the ConfigMap below are auto-loaded on startup
 dashboardProviders:
   dashboardproviders.yaml:
     apiVersion: 1
     providers:
       - name: default
         orgId: 1
-        folder: ''
+        folder: ''         # Root folder in Grafana UI
         type: file
         disableDeletion: false
-        editable: true
         options:
-          path: /var/lib/grafana/dashboards/default
+          path: /var/lib/grafana/dashboards/default  # Mount path inside pod
 
+# --- Pre-loaded Dashboards ---
+# Import community dashboards by ID from grafana.com/grafana/dashboards
 dashboards:
   default:
     kubernetes-cluster:
-      gnetId: 6417
+      gnetId: 7249        # Dashboard ID from grafana.com — K8s cluster overview
       revision: 1
       datasource: Prometheus
-    nodejs-app:
-      gnetId: 11159
+    node-exporter:
+      gnetId: 1860        # Node Exporter Full — CPU/RAM/disk per node
+      revision: 27
+      datasource: Prometheus
+    kubernetes-pods:
+      gnetId: 6336        # K8s pod monitoring dashboard
       revision: 1
       datasource: Prometheus
-
-resources:
-  requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
-    cpu: 200m
-    memory: 256Mi
-
-grafana.ini:
-  server:
-    root_url: "%(protocol)s://%(domain)s/"
-  auth.anonymous:
-    enabled: false
