@@ -1,91 +1,110 @@
-apiVersion: apps/v1
-kind: Deployment
+# ==================================================================
+# deployment.yaml — Order Service Kubernetes Deployment
+# ==================================================================
+#
+# WHAT IS A DEPLOYMENT?
+# A Deployment is a Kubernetes controller that manages ReplicaSets and
+# ensures a specified number of pod replicas are running at all times.
+# It provides declarative updates, rollbacks, and scaling capabilities.
+#
+# KEY FEATURES:
+#   • Rolling updates → Zero-downtime deployments
+#   • Automatic rollback → If new version fails
+#   • Scaling → Increase/decrease replicas on demand
+#   • Self-healing → Restarts failed pods automatically
+#
+# ==================================================================
+
+apiVersion: apps/v1  # Kubernetes API version for Deployments
+kind: Deployment  # Resource type
+
 metadata:
-  name: order-service
-  namespace: devops-showcase
+  name: order-service  # Name of the Deployment
+  namespace: devops-showcase  # Namespace (logical cluster separation)
   labels:
-    app: order-service
+    app: order-service  # Label for organizing/selecting resources
+
 spec:
-  replicas: 2
+  replicas: 2  # Run 2 pod replicas for high availability and load distribution
+  
+  # ──── Selector ────
+  # Defines which pods this Deployment manages (based on labels)
   selector:
     matchLabels:
-      app: order-service
+      app: order-service  # Pods with this label are managed by this Deployment
+  
+  # ──── Deployment Strategy ────
+  # How updates are rolled out to pods
   strategy:
-    type: RollingUpdate
+    type: RollingUpdate  # Gradually replace old pods with new ones (zero downtime)
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      maxSurge: 1  # Max 1 extra pod during update (allows testing new version)
+      maxUnavailable: 0  # Never allow all pods to be down (ensures availability)
+  
+  # ──── Pod Template ────
+  # Defines the pods that will be created
   template:
     metadata:
       labels:
-        app: order-service
+        app: order-service  # Labels applied to each pod
       annotations:
-        prometheus.io/scrape: 'true'
-        prometheus.io/port: '3002'
-        prometheus.io/path: '/metrics'
+        # Prometheus annotations → Tell Prometheus to scrape metrics from this pod
+        prometheus.io/scrape: 'true'  # Enable metric scraping
+        prometheus.io/port: '3002'  # Port where metrics are exposed
+        prometheus.io/path: '/metrics'  # Endpoint path for metrics
+    
     spec:
+      # ──── Container Specification ────
       containers:
-        - name: order-service
-          image: REPLACE_WITH_ECR_REGISTRY/order-service:latest
-          ports:
-            - containerPort: 3002
-          env:
-            - name: NODE_ENV
-              value: production
-            - name: PORT
-              value: '3002'
-            - name: PRODUCT_SERVICE_URL
-              value: http://product-service:3001
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 3002
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          readinessProbe:
-            httpGet:
-              path: /ready
-              port: 3002
-            initialDelaySeconds: 5
-            periodSeconds: 10
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: order-service
-  namespace: devops-showcase
-spec:
-  selector:
-    app: order-service
-  ports:
-    - protocol: TCP
-      port: 3002
-      targetPort: 3002
-  type: ClusterIP
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: order-service-hpa
-  namespace: devops-showcase
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: order-service
-  minReplicas: 2
-  maxReplicas: 8
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
+      - name: order-service  # Container name
+        # Image from ECR (Amazon Elastic Container Registry)
+        # Jenkins updates this during CI/CD with the actual ECR registry URL
+        image: REPLACE_WITH_ECR_REGISTRY/order-service:latest
+        
+        ports:
+        - containerPort: 3002  # Expose port 3002 inside the pod
+        
+        # ──── Environment Variables ────
+        env:
+        - name: NODE_ENV
+          value: production  # Run in production mode
+        - name: PORT
+          value: '3002'  # Port the Node.js app listens on
+        - name: PRODUCT_SERVICE_URL
+          value: 'http://product-service:3001'  # URL to reach product service
+        - name: FRONTEND_URL
+          value: 'http://frontend:3000'  # URL to reach frontend
+        
+        # ──── Resource Limits ────
+        # Prevent a single pod from consuming all cluster resources
+        resources:
+          requests:  # Minimum resources guaranteed to the pod
+            memory: "128Mi"  # 128 megabytes of RAM
+            cpu: "100m"  # 0.1 CPU cores (100 millicores)
+          limits:  # Maximum resources the pod can use
+            memory: "256Mi"  # 256 MB max
+            cpu: "200m"  # 0.2 CPU cores max
+        
+        # ──── Liveness Probe ────
+        # Checks if the container is alive; restarts if it fails
+        livenessProbe:
+          httpGet:
+            path: /health  # Health check endpoint
+            port: 3002
+          initialDelaySeconds: 30  # Wait 30s before first check (app startup time)
+          periodSeconds: 10  # Check every 10 seconds
+          timeoutSeconds: 5  # Fail if response takes >5s
+          failureThreshold: 3  # Restart after 3 consecutive failures
+        
+        # ──── Readiness Probe ────
+        # Checks if the container is ready to serve traffic
+        # If this fails, pod is removed from service load balancer
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 10  # Start checking after 10s
+          periodSeconds: 5  # Check every 5 seconds
+          timeoutSeconds: 3  # Timeout after 3s
+          successThreshold: 1  # Mark ready after 1 success
+          failureThreshold: 3  # Mark not-ready after 3 failures
