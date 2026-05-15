@@ -1,71 +1,76 @@
-# Kube-Prometheus-Stack Helm values
-# Install: helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
-#   -n monitoring --create-namespace -f monitoring/prometheus-values.yaml
+# ==============================================================
+# prometheus-values.yaml — Helm values for kube-prometheus-stack
+# ==============================================================
+#
+# WHAT IS THIS FILE?
+# This overrides the default Helm chart values for the
+# 'kube-prometheus-stack' chart, which bundles:
+#   - Prometheus     → time-series metrics collection & storage
+#   - Alertmanager   → alert routing (email, Slack, PagerDuty)
+#   - Grafana        → dashboards and visualization
+#   - node-exporter  → node-level metrics (CPU, RAM, disk)
+#   - kube-state-metrics → K8s object metrics (pods, deployments)
+#
+# INSTALL COMMAND:
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace \
+#     -f monitoring/prometheus-values.yaml
+# ==============================================================
 
+# --- Prometheus Server Configuration ---
 prometheus:
   prometheusSpec:
-    retention: 15d
+    retention: 15d   # Keep 15 days of metrics data in storage
+
+    # Persistent storage so metrics survive pod restarts
     storageSpec:
       volumeClaimTemplate:
         spec:
-          accessModes: ["ReadWriteOnce"]
+          accessModes: ["ReadWriteOnce"]  # Single node read-write (standard for EBS)
           resources:
             requests:
-              storage: 20Gi
+              storage: 20Gi              # 20GB EBS volume for metrics data
+
+    # --- Custom Scrape Jobs ---
+    # Prometheus auto-discovers targets from K8s, but this adds a
+    # custom job to scrape pods annotated with prometheus.io/scrape: true
     additionalScrapeConfigs:
-      - job_name: devops-showcase-apps
+      - job_name: devops-showcase-apps    # Name visible in Prometheus UI
         kubernetes_sd_configs:
-          - role: pod
+          - role: pod                     # Discover pods automatically
             namespaces:
-              names: [devops-prod]
+              names: [devops-prod]        # Only scrape pods in this namespace
         relabel_configs:
+          # ONLY scrape pods that have the annotation prometheus.io/scrape: "true"
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
             action: keep
             regex: true
+          # Use the port from annotation prometheus.io/port if set
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
             action: replace
             target_label: __address__
             regex: (.+)
             replacement: $1
+          # Add pod name as a label on every scraped metric
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          # Add namespace as a label on every scraped metric
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
 
-grafana:
-  enabled: true
-  adminPassword: changeme123
-  ingress:
-    enabled: true
-    annotations:
-      kubernetes.io/ingress.class: nginx
-    hosts:
-      - grafana.devops-showcase.local
-  dashboards:
-    default:
-      kubernetes-cluster:
-        gnetId: 7249
-        revision: 1
-        datasource: Prometheus
-      node-exporter:
-        gnetId: 1860
-        revision: 27
-        datasource: Prometheus
-      jenkins:
-        gnetId: 9964
-        revision: 1
-        datasource: Prometheus
-
+# --- Alertmanager Configuration ---
 alertmanager:
-  enabled: true
-  config:
-    global:
-      slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
-    route:
-      group_by: ['alertname', 'namespace']
-      group_wait: 30s
-      group_interval: 5m
-      repeat_interval: 3h
-      receiver: slack-notifications
-    receivers:
-      - name: slack-notifications
-        slack_configs:
-          - channel: '#devops-alerts'
-            title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
-            text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+  alertmanagerSpec:
+    # Persistent storage for alert state and silences
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi              # Small volume — just for alert state
+
+# --- Grafana is managed separately via grafana-values.yaml ---
+# Disable the bundled Grafana here to avoid conflicts
+grafana:
+  enabled: false                        # We deploy Grafana independently
