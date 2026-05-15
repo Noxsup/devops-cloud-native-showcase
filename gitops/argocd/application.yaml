@@ -1,32 +1,59 @@
+# =============================================================
+# application.yaml — ArgoCD Application (GitOps)
+#
+# This is the core of the GitOps pattern.
+# ArgoCD reads this file, then continuously watches the Git repo.
+# When Jenkins pushes a new image tag to deploy/k8s/, ArgoCD
+# automatically detects the diff and syncs it to the EKS cluster.
+#
+# How it works:
+#   1. Jenkins updates deploy/k8s/*/deployment.yaml with new image tag
+#   2. Jenkins pushes the change to GitHub
+#   3. ArgoCD polls GitHub every 3 minutes (or webhook)
+#   4. ArgoCD sees the diff, applies the new manifests to EKS
+#   5. Kubernetes performs a rolling update — zero downtime
+# =============================================================
+
+# ArgoCD custom resource — requires ArgoCD CRDs installed in cluster
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: devops-showcase
-  namespace: argocd
+  name: devops-showcase        # Name shown in the ArgoCD UI
+  namespace: argocd            # Must be deployed into the 'argocd' namespace
   finalizers:
+    # Ensures all child K8s resources are deleted when this Application is deleted
     - resources-finalizer.argocd.argoproj.io
 spec:
+  # Which ArgoCD project this app belongs to (defined in appproject.yaml)
   project: devops-showcase
+
+  # SOURCE: Where ArgoCD reads the desired state from (Git)
   source:
     repoURL: https://github.com/Noxsup/devops-cloud-native-showcase.git
-    targetRevision: main
-    path: deploy/k8s
+    targetRevision: main        # Watch the 'main' branch
+    path: deploy/k8s            # Only sync files under this path in the repo
+
+  # DESTINATION: Where ArgoCD applies the manifests (the EKS cluster)
   destination:
-    server: https://kubernetes.default.svc
-    namespace: devops-showcase
+    server: https://kubernetes.default.svc  # In-cluster API server
+    namespace: devops-showcase              # Target namespace in EKS
+
+  # SYNC POLICY: Controls how ArgoCD applies changes
   syncPolicy:
     automated:
-      prune: true
-      selfHeal: true
-      allowEmpty: false
+      prune: true      # Delete K8s resources that are removed from Git
+      selfHeal: true   # Re-apply if someone manually changes K8s (drift correction)
+      allowEmpty: false # Prevent accidentally syncing an empty app
+
     syncOptions:
-      - CreateNamespace=true
-      - PrunePropagationPolicy=foreground
-      - PruneLast=true
+      - CreateNamespace=true          # Auto-create namespace if it doesn't exist
+      - PrunePropagationPolicy=foreground  # Wait for child resources to delete first
+      - PruneLast=true                # Prune deleted resources after new ones are healthy
+
+    # Retry logic: if sync fails (e.g. image pull error), retry automatically
     retry:
-      limit: 5
+      limit: 5           # Max 5 retry attempts
       backoff:
-        duration: 5s
-        factor: 2
-        maxDuration: 3m
-  revisionHistoryLimit: 10
+        duration: 5s     # Wait 5 seconds before first retry
+        factor: 2        # Double the wait time on each subsequent retry (exponential)
+        maxDuration: 3m  # Never wait more than 3 minutes between retries
