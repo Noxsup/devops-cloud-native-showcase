@@ -65,6 +65,8 @@ Developer Push to GitHub
 ### 1. Provision AWS Infrastructure
 
 ```bash
+
+> **💻 Run this on: YOUR LOCAL MACHINE** (where you have AWS CLI and Terraform installed)
 cd infra/terraform
 export TF_VAR_tf_state_bucket=your-s3-bucket-name
 terraform init
@@ -74,6 +76,8 @@ terraform apply
 
 ### 2. Bootstrap Jenkins Host (Ansible)
 
+
+> **💻 Run this on: YOUR LOCAL MACHINE**
 ```bash
 # Edit config/ansible/inventory/hosts.ini with your EC2 IP
 cd config/ansible
@@ -82,12 +86,16 @@ ansible-playbook -i inventory/hosts.ini playbook.yml
 
 ### 3. Connect kubectl to EKS
 
+
+> **💻 Run this on: YOUR LOCAL MACHINE**
 ```bash
 aws eks update-kubeconfig --region us-east-1 --name devops-showcase-eks
 ```
 
 ### 4. Install ArgoCD
 
+
+> **💻 Run this on: YOUR LOCAL MACHINE** (kubectl must be configured to connect to your EKS cluster)
 ```bash
 kubectl create namespace argocd
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
@@ -96,6 +104,8 @@ kubectl apply -f gitops/argocd/application.yaml
 
 ### 5. Install Monitoring Stack
 
+
+> **💻 Run this on: YOUR LOCAL MACHINE** (kubectl must be configured, Helm 3+ required)
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
